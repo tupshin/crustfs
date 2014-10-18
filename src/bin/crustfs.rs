@@ -37,6 +37,7 @@ fn main () {
     create_table: "CREATE TABLE crustfs.inode (inode int, size int, blocks int, atime int, mtime int, ctime int, crtime int, kind text, perm text, nlink int, uid int, gid int, rdev int, flags int, PRIMARY KEY (inode));".to_string(),
     select_inode: "SELECT * FROM crustfs.inode WHERE inode =1;".to_string()
   };
+
   
   let mountpoint = Path::new(os::args()[1].as_slice());
   let contact_points = "127.0.0.1".to_string();
@@ -151,10 +152,12 @@ impl Filesystem for CrustFS {
   }}  
 
   fn mknod (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _mode: u32, _rdev: u32, reply: ReplyEntry) {
+    fail!("mknod not implemented");
     reply.error(ENOENT);
   }
 
   fn mkdir (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _mode: u32, reply: ReplyEntry) {
+    fail!("mkdir not implemented");
     reply.error(ENOENT);
   }
 
@@ -193,40 +196,48 @@ impl Filesystem for CrustFS {
   /// have a limited lifetime. On unmount it is not guaranteed, that all referenced
   /// inodes will receive a forget message.
   fn forget (&mut self, _req: &Request, _ino: u64, _nlookup: uint) {
+        fail!("forget not implemented");
   }
 
   /// Set file attributes
   fn setattr (&mut self, _req: &Request, _ino: u64, _mode: Option<u32>, _uid: Option<u32>, _gid: Option<u32>, _size: Option<u64>, _atime: Option<Timespec>, _mtime: Option<Timespec>, _fh: Option<u64>, _crtime: Option<Timespec>, _chgtime: Option<Timespec>, _bkuptime: Option<Timespec>, _flags: Option<u32>, reply: ReplyAttr) {
+    fail!("setattr not implemented");
     reply.error(ENOSYS);
   }
 
   /// Read symbolic link
   fn readlink (&mut self, _req: &Request, _ino: u64, reply: ReplyData) {
+    fail!("readlink not implemented");
     reply.error(ENOSYS);
   }
 
   /// Remove a file
   fn unlink (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, reply: ReplyEmpty) {
+    fail!("unlink not implemented");
     reply.error(ENOSYS);
   }
 
   /// Remove a directory
   fn rmdir (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, reply: ReplyEmpty) {
+    fail!("rmdir not implemented");    
     reply.error(ENOSYS);
   }
 
   /// Create a symbolic link
   fn symlink (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _link: &PosixPath, reply: ReplyEntry) {
+    fail!("symlink not implemented");
     reply.error(ENOSYS);
   }
 
   /// Rename a file
   fn rename (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _newparent: u64, _newname: &PosixPath, reply: ReplyEmpty) {
+    fail!("rename not implemented");
     reply.error(ENOSYS);
   }
 
   /// Create a hard link
   fn link (&mut self, _req: &Request, _ino: u64, _newparent: u64, _newname: &PosixPath, reply: ReplyEntry) {
+    fail!("link not implemented");
     reply.error(ENOSYS);
   }
 
@@ -249,6 +260,7 @@ impl Filesystem for CrustFS {
   /// value of this operation. fh will contain the value set by the open method, or
   /// will be undefined if the open method didn't set any value.
   fn write (&mut self, _req: &Request, _ino: u64, _fh: u64, _offset: u64, _data: &[u8], _flags: uint, reply: ReplyWrite) {
+    fail!("write not implemented");    
     reply.error(ENOSYS);
   }
 
@@ -274,7 +286,7 @@ impl Filesystem for CrustFS {
   /// the release. fh will contain the value set by the open method, or will be undefined
   /// if the open method didn't set any value. flags will contain the same flags as for
   /// open.
-  fn release (&mut self, _req: &Request, _ino: u64, _fh: u64, _flags: uint, _lock_owner: u64, _flush: bool, reply: ReplyEmpty) {
+  fn release (&mut self, _req: &Request, _ino: u64, _fh: u64, _flags: uint, _lock_owner: u64, _flush: bool, reply: ReplyEmpty) {    
     reply.ok();
   }
 
@@ -282,6 +294,7 @@ impl Filesystem for CrustFS {
   /// If the datasync parameter is non-zero, then only the user data should be flushed,
   /// not the meta data.
   fn fsync (&mut self, _req: &Request, _ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
+    fail!("fsync not implemented");    
     reply.error(ENOSYS);
   }
 
@@ -309,6 +322,7 @@ impl Filesystem for CrustFS {
   /// be flushed, not the meta data. fh will contain the value set by the opendir
   /// method, or will be undefined if the opendir method didn't set any value.
   fn fsyncdir (&mut self, _req: &Request, _ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
+    fail!("fsyncdir not implemented");
     reply.error(ENOSYS);
   }
 
@@ -319,6 +333,7 @@ impl Filesystem for CrustFS {
 
   /// Set an extended attribute
   fn setxattr (&mut self, _req: &Request, _ino: u64, _name: &[u8], _value: &[u8], _flags: uint, _position: u32, reply: ReplyEmpty) {
+    fail!("setxattr not implemented");
     reply.error(ENOSYS);
   }
 
@@ -326,6 +341,7 @@ impl Filesystem for CrustFS {
   fn getxattr (&mut self, _req: &Request, _ino: u64, _name: &[u8], reply: ReplyData) {
   // FIXME: If arg.size is zero, the size of the value should be sent with fuse_getxattr_out
   // FIXME: If arg.size is non-zero, send the value if it fits, or ERANGE otherwise
+    fail!("getxattr not implemented");
     reply.error(ENOSYS);
   }
 
@@ -333,11 +349,13 @@ impl Filesystem for CrustFS {
   fn listxattr (&mut self, _req: &Request, _ino: u64, reply: ReplyEmpty) {
   // FIXME: If arg.size is zero, the size of the attribute list should be sent with fuse_getxattr_out
   // FIXME: If arg.size is non-zero, send the attribute list if it fits, or ERANGE otherwise
+    fail!("listxattr not implemented");
     reply.error(ENOSYS);
   }
 
   /// Remove an extended attribute
   fn removexattr (&mut self, _req: &Request, _ino: u64, _name: &[u8], reply: ReplyEmpty) {
+    fail!("removexattr not implemented");
     reply.error(ENOSYS);
   }
 
@@ -346,6 +364,7 @@ impl Filesystem for CrustFS {
   /// mount option is given, this method is not called. This method is not called
   /// under Linux kernel versions 2.4.x
   fn access (&mut self, _req: &Request, _ino: u64, _mask: uint, reply: ReplyEmpty) {
+    fail!("access not implemented");
     reply.error(ENOSYS);
   }
 
@@ -360,11 +379,13 @@ impl Filesystem for CrustFS {
   /// implemented or under Linux kernel versions earlier than 2.6.15, the mknod()
   /// and open() methods will be called instead.
   fn create (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _mode: u32, _flags: uint, reply: ReplyCreate) {
+    fail!("create not implemented");
     reply.error(ENOSYS);
   }
 
   /// Test for a POSIX file lock
   fn getlk (&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, _start: u64, _end: u64, _typ: u32, _pid: u32, reply: ReplyLock) {
+    fail!("getlk not implemented");
     reply.error(ENOSYS);
   }
 
@@ -376,6 +397,7 @@ impl Filesystem for CrustFS {
   /// implemented, the kernel will still allow file locking to work locally.
   /// Hence these are only interesting for network filesystems and similar.
   fn setlk (&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, _start: u64, _end: u64, _typ: u32, _pid: u32, _sleep: bool, reply: ReplyEmpty) {
+    fail!("setlk not implemented");
     reply.error(ENOSYS);
   }
 
@@ -383,6 +405,7 @@ impl Filesystem for CrustFS {
   /// Note: This makes sense only for block device backed filesystems mounted
   /// with the 'blkdev' option
   fn bmap (&mut self, _req: &Request, _ino: u64, _blocksize: uint, _idx: u64, reply: ReplyBmap) {
+    fail!("getxattr not implemented");
     reply.error(ENOSYS);
   }
 }
