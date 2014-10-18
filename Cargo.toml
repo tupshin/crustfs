@@ -1,0 +1,14 @@
+[package]
+name = "crustfs"
+version = "0.0.1"
+authors = [ "Tupshin Harper <tupshin@tupshin.com" ]
+
+[[bin]]
+name = "chello" # the name of the executable to generate
+path = "src/bin/crustfs.rs"
+
+[dependencies.cassandra]
+git = "https://github.com/tupshin/rust-cassandra-wrapper"
+
+[dependencies.fuse]
+git = "https://github.com/tupshin/rust-fuse"
