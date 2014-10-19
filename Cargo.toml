@@ -8,6 +8,10 @@ name = "crustfs"
 path = "src/crustfs.rs"
 
 [[bin]]
+name = "mkcrustfs" # the name of the executable to generate
+path = "src/bin/mkfs.rs"
+
+[[bin]]
 name = "chello" # the name of the executable to generate
 path = "src/bin/chello.rs"
 
