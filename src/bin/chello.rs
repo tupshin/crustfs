@@ -20,19 +20,16 @@ fn main () {
       (part_id int, inode bigint, parent_inode bigint, size text, blocks text, atime text, mtime text,
       ctime text, crtime text, kind text, perm text, nlink text, uid text, gid text,
       rdev text, flags text, PRIMARY KEY (part_id,inode)) WITH CLUSTERING ORDER BY (inode DESC);".to_string(),
-//   create_inode_table: "CREATE TABLE IF NOT EXISTS crustfs.inode
-//      (part_id int, inode int, parent_inode int, size int, blocks int, atime int, mtime int,
-//      ctime int, crtime int, kind text, perm text, nlink int, uid int, gid int,
-//      rdev int, flags int, PRIMARY KEY (part_id,inode)) WITH CLUSTERING ORDER BY (inode DESC);".to_string(),
     create_fs_metadata_table: "CREATE TABLE IF NOT EXISTS crustfs.fs_metadata
       (key text, value text, PRIMARY KEY (key))".to_string(),
     select_inode: "SELECT * FROM crustfs.inode
       WHERE part_id=1 and inode =1;".to_string(),
-    insert_inode: "INSERT INTO crustfs.inode(part_id, inode, parent_inode, size, blocks,
-      atime, mtime, ctime, crtime, kind, perm, nlink, uid, gid, rdev, flags)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)".to_string(),
-      select_max_inode: "SELECT inode FROM crustfs.inode where part_id = ? order by inode desc limit 1".to_string(),
-
+    create_inode: "UPDATE crustfs.inode SET parent_inode=?, size=?, blocks=?,
+      atime=?, mtime=?, ctime=?, crtime=?, kind=?, perm=?, nlink=?, uid=?, gid=?, rdev=?, flags=?
+      where part_id = ? and inode = ? if parent_inode=NULL".to_string(),
+    insert_inode_placeholder: "INSERT INTO crustfs.inode(part_id, inode)
+      VALUES(?,?) IF NOT EXISTS".to_string(),
+    select_max_inode: "SELECT inode FROM crustfs.inode where part_id = ? order by inode desc limit 1".to_string(),
   };
 
   let mountpoint = Path::new(os::args()[1].as_slice());

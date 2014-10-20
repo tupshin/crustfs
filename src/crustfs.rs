@@ -29,9 +29,6 @@ use time::Timespec;
 use cassandra::Statement;
 use cassandra::Session;
 
-
-
-
 static HELLO_DIR_ATTR: FileAttr = FileAttr {
     ino: 1,
     size: 0,
@@ -76,8 +73,9 @@ pub struct Commands {
   pub create_ks:String,
   pub create_inode_table:String,
   pub create_fs_metadata_table:String,
-  pub insert_inode:String,
+  pub create_inode:String,
   pub select_max_inode:String,
+  pub insert_inode_placeholder:String,
 }
 
 pub struct CrustFS {
@@ -92,13 +90,12 @@ pub struct CrustFS {
 static INODE_PARTITIONS:u64=5;
 
 impl CrustFS {
-  fn allocate_inode(&mut self) -> u64 {
-
+  fn allocate_inode(&mut self) -> (u64,u64) {
     //choose a random partition
     let partition:u64 = task_rng().gen_range(0u64,INODE_PARTITIONS);
 
     //select the maximum inode value in that partition.
-    let select_max_inode_statement = &mut Statement::build_from_string(self.cmds.select_max_inode.clone(),0);
+    let select_max_inode_statement = &mut Statement::build_from_string(self.cmds.select_max_inode.clone(),1);
     println!("binding partition: {}",partition);
     select_max_inode_statement.bind_int64(0, partition as i64);
 
@@ -107,23 +104,29 @@ impl CrustFS {
       Ok(select_result) => {
         //generate  a new inode by taking max found in #2 + INODE_PARTITIONS which is our offset for inodes within each partition.      
         let next_inode = if select_result.row_count() == 0u64
-          {partition} //if this will be the first inode in the partition, then the new inode will be the same as the partition id.
+          {
+            debug!("zero rows found in partition. adding first one");
+            partition
+        } //if this will be the first inode in the partition, then the new inode will be the same as the partition id.
         else {
           match select_result.first_row().get_column(0).get_int64() {
-            Ok(res) => {res as u64},
+            Ok(res) => {
+              debug!("got row {} in partition {}. adding new row {}",res,partition,res as u64+INODE_PARTITIONS);
+              res as u64 + INODE_PARTITIONS
+              },
             Err(e) => {fail!("corrupt fs: {}",e)}
           }
         };
         //insert into inode if not exists on the new inode.
-        let insert_inode_statement = &mut Statement::build_from_string(self.cmds.insert_inode.clone(),0);
+        let insert_inode_placeholder_statement = &mut Statement::build_from_string(self.cmds.insert_inode_placeholder.clone(),2);
 
         //FIXME make these chainable
-        insert_inode_statement.bind_int64(0, partition as i64);
-        insert_inode_statement.bind_int64(1, next_inode as i64); 
-        match self.session.execute(insert_inode_statement) {
+        insert_inode_placeholder_statement.bind_int64(0, partition as i64);
+        insert_inode_placeholder_statement.bind_int64(1, next_inode as i64); 
+        match self.session.execute(insert_inode_placeholder_statement) {
           Ok(_) => {
             //FIXME. make sure I don't need to pay more attention to a succsesful result
-            next_inode //the insert succeeded, so we can consider the generated inode to be valid
+            (partition,next_inode) //the insert succeeded, so we can consider the generated inode to be valid
           }
           Err(e) => {
             debug!("insert race condition encountered: {}",e);
@@ -425,9 +428,11 @@ impl Filesystem for CrustFS {
         println!("_name: {}",_name.is_file());
         println!("_parent: {}", _parent);
 
+        let (partition,inode) = self.allocate_inode();
+
         let now = time::get_time();
         let new_file = FileAttr{
-          ino:self.allocate_inode(),
+          ino:inode,
           size:0,blocks:0,
           atime:now,mtime:now,ctime:now,crtime:now,
           kind:TypeFile,
@@ -438,24 +443,24 @@ impl Filesystem for CrustFS {
           flags:0,
         };
 
-        let mut statement = Statement::build_from_string(self.cmds.insert_inode.clone(), 16);
+        let mut statement = Statement::build_from_string(self.cmds.create_inode.clone(), 16);
         println!("inserting inode:{}",new_file.ino);
-        statement.bind_int64(0, new_file.ino as i64);
-        statement.bind_int64(1, new_file.ino as i64);
-        statement.bind_int64(2, _parent as i64);
-        statement.bind_int64(3, new_file.size as i64);
-        statement.bind_int64(4, new_file.blocks as i64);
-        statement.bind_int64(5, new_file.atime.sec as i64);
-        statement.bind_int64(6, new_file.mtime.sec as i64);
-        statement.bind_int64(7, new_file.ctime.sec as i64);
-        statement.bind_int64(8, new_file.crtime.sec as i64);
-        statement.bind_string(9, /* FIXME new_file.kind */ "file".to_string());
-        statement.bind_int32(10, new_file.perm.bits() as i32);
-        statement.bind_int32(11, new_file.nlink as i32);
-        statement.bind_int32(12, new_file.uid as i32);
-        statement.bind_int32(13, new_file.gid as i32);
-        statement.bind_int32(14, new_file.rdev as i32);
-        statement.bind_int32(15, new_file.flags as i32);
+        statement.bind_int64(0, _parent as i64);
+        statement.bind_int64(1, new_file.size as i64);
+        statement.bind_int64(2, new_file.blocks as i64);
+        statement.bind_int64(3, new_file.atime.sec as i64);
+        statement.bind_int64(4, new_file.mtime.sec as i64);
+        statement.bind_int64(5, new_file.ctime.sec as i64);
+        statement.bind_int64(6, new_file.crtime.sec as i64);
+        statement.bind_string(7, /* FIXME new_file.kind */ "file".to_string());
+        statement.bind_int32(8, new_file.perm.bits() as i32);
+        statement.bind_int32(9, new_file.nlink as i32);
+        statement.bind_int32(10, new_file.uid as i32);
+        statement.bind_int32(11, new_file.gid as i32);
+        statement.bind_int32(12, new_file.rdev as i32);
+        statement.bind_int32(13, new_file.flags as i32);
+        statement.bind_int64(14, partition as i64);
+        statement.bind_int64(15, new_file.ino as i64);
         
         assert!(self.session.execute(&mut statement).is_ok());
 
