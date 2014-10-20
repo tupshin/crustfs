@@ -1,5 +1,8 @@
 #![crate_name = "crustfs"]
 
+#![feature(phase)]
+#[phase(plugin, link)] extern crate log;
+
 extern crate libc;
 extern crate time;
 extern crate fuse;
@@ -8,28 +11,26 @@ extern crate cassandra;
 
 use std::c_str::CString;
 
-use std::io::FilePermission;
+use std::rand::{task_rng, Rng};
 
-use std::io::{TypeFile, TypeDirectory, USER_FILE, USER_DIR};
+use std::io::{FilePermission,TypeFile, TypeDirectory, USER_FILE, USER_DIR};
 use std::io::fs::PathExtensions;
 
 use fuse::{FileAttr, Filesystem, Request, ReplyData, ReplyEntry, ReplyAttr, ReplyDirectory};
-
 use fuse::{ReplyEmpty, ReplyOpen, ReplyCreate, ReplyStatfs, ReplyWrite, ReplyLock, ReplyBmap};
 
 use libc::consts::os::posix88::EIO;
 use libc::c_int;
+use libc::ENOENT;
+use libc::ENOSYS;
+
 use time::Timespec;
 
 use cassandra::Statement;
 use cassandra::Session;
 
 
-use std::rand;
-use std::rand::Rng;
 
-use libc::ENOENT;
-use libc::ENOSYS;
 
 static HELLO_DIR_ATTR: FileAttr = FileAttr {
     ino: 1,
@@ -76,20 +77,66 @@ pub struct Commands {
   pub create_inode_table:String,
   pub create_fs_metadata_table:String,
   pub insert_inode:String,
-} 
-
+  pub select_max_inode:String,
+}
 
 pub struct CrustFS {
   pub session:Session,
-  pub cmds:Commands
+  pub cmds:Commands,
 }
 
+//This is the number of partitions the inodes will be sharded into.
+//In production, this should be quite high. If you want strictly linear
+//growth in inode generation for testing, set it to 1, but that will
+//cause a hot spot in the cluster.
+static INODE_PARTITIONS:u64=5;
+
 impl CrustFS {
-    fn allocate_inode() -> u64 {
-    //FIXME use the inode table partitions static column to get a new distinct inode with serial consistency
-    let mut rng = rand::task_rng(); //yeah yeah, don't reinitialize
-    rng.gen::<u64>()
+  fn allocate_inode(&mut self) -> u64 {
+
+    //choose a random partition
+    let partition:u64 = task_rng().gen_range(0u64,INODE_PARTITIONS);
+
+    //select the maximum inode value in that partition.
+    let select_max_inode_statement = &mut Statement::build_from_string(self.cmds.select_max_inode.clone(),0);
+    println!("binding partition: {}",partition);
+    select_max_inode_statement.bind_int64(0, partition as i64);
+
+    //return the inode that is generated out of the 
+    match self.session.execute(select_max_inode_statement) {
+      Ok(select_result) => {
+        //generate  a new inode by taking max found in #2 + INODE_PARTITIONS which is our offset for inodes within each partition.      
+        let next_inode = if select_result.row_count() == 0u64
+          {partition} //if this will be the first inode in the partition, then the new inode will be the same as the partition id.
+        else {
+          match select_result.first_row().get_column(0).get_int64() {
+            Ok(res) => {res as u64},
+            Err(e) => {fail!("corrupt fs: {}",e)}
+          }
+        };
+        //insert into inode if not exists on the new inode.
+        let insert_inode_statement = &mut Statement::build_from_string(self.cmds.insert_inode.clone(),0);
+
+        //FIXME make these chainable
+        insert_inode_statement.bind_int64(0, partition as i64);
+        insert_inode_statement.bind_int64(1, next_inode as i64); 
+        match self.session.execute(insert_inode_statement) {
+          Ok(_) => {
+            //FIXME. make sure I don't need to pay more attention to a succsesful result
+            next_inode //the insert succeeded, so we can consider the generated inode to be valid
+          }
+          Err(e) => {
+            debug!("insert race condition encountered: {}",e);
+            self.allocate_inode() //can retry on failed inode allocation be tail recursive?
+          }
+        }
+      },
+      Err(e) => {
+        fail!("server errror: {}", e);
+      },
+    }
   }
+  
 }
 
 impl Filesystem for CrustFS {
@@ -120,8 +167,7 @@ impl Filesystem for CrustFS {
     let mut statement = Statement::build_from_string(self.cmds.select_inode.clone(), 1);
     
     let future=self.session.execute(&mut statement);
-            statement.bind_string(0, ino.to_string());
-
+    statement.bind_string(0, ino.to_string());
     match future {
       Err(_) => {
         reply.error(ENOENT)
@@ -131,17 +177,17 @@ impl Filesystem for CrustFS {
         if rows.next() {
           let row = rows.get_row();
           match row.get_column(9).get_string() {
-            Err(err) => println!("{}--",err),
+            Err(err) => error!("{}--",err),
             Ok(col) => {
               let cstr = CString::new(col.cass_string.data,false);
-               println!("{}--",cstr);
+               debug!("{}--",cstr);
               reply.data(cstr.as_bytes().slice_from(offset as uint));
             }
           }
         }
       }
     }
-  }}  
+  }}
 
   fn mknod (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _mode: u32, _rdev: u32, reply: ReplyEntry) {
     reply.error(ENOENT);
@@ -381,7 +427,7 @@ impl Filesystem for CrustFS {
 
         let now = time::get_time();
         let new_file = FileAttr{
-          ino:CrustFS::allocate_inode(),
+          ino:self.allocate_inode(),
           size:0,blocks:0,
           atime:now,mtime:now,ctime:now,crtime:now,
           kind:TypeFile,
@@ -393,25 +439,23 @@ impl Filesystem for CrustFS {
         };
 
         let mut statement = Statement::build_from_string(self.cmds.insert_inode.clone(), 16);
- //(part_id int, inode int, parent_inode int, size int, blocks int, atime int, mtime int,
         println!("inserting inode:{}",new_file.ino);
-        statement.bind_string(0, new_file.ino.to_string());
-        statement.bind_string(1, new_file.ino.to_string());
-        statement.bind_string(2, _parent.to_string());
-        statement.bind_string(3, new_file.size.to_string());
-        statement.bind_string(4, new_file.blocks.to_string());
-        statement.bind_string(5, new_file.atime.sec.to_string());
-        statement.bind_string(6, new_file.mtime.sec.to_string());
-        statement.bind_string(6, new_file.crtime.sec.to_string());
-        statement.bind_string(7, /* FIXME new_file.kind */ "file".to_string());
-        statement.bind_string(8, new_file.perm.bits().to_string());
-        statement.bind_string(9, new_file.nlink.to_string());
-        statement.bind_string(10, new_file.uid.to_string());
-        statement.bind_string(11, new_file.rdev.to_string());
-        statement.bind_string(12, new_file.flags.to_string());
-        statement.bind_string(13, new_file.flags.to_string());
-        statement.bind_string(14, new_file.flags.to_string());
-        statement.bind_string(15, new_file.flags.to_string());
+        statement.bind_int64(0, new_file.ino as i64);
+        statement.bind_int64(1, new_file.ino as i64);
+        statement.bind_int64(2, _parent as i64);
+        statement.bind_int64(3, new_file.size as i64);
+        statement.bind_int64(4, new_file.blocks as i64);
+        statement.bind_int64(5, new_file.atime.sec as i64);
+        statement.bind_int64(6, new_file.mtime.sec as i64);
+        statement.bind_int64(7, new_file.ctime.sec as i64);
+        statement.bind_int64(8, new_file.crtime.sec as i64);
+        statement.bind_string(9, /* FIXME new_file.kind */ "file".to_string());
+        statement.bind_int32(10, new_file.perm.bits() as i32);
+        statement.bind_int32(11, new_file.nlink as i32);
+        statement.bind_int32(12, new_file.uid as i32);
+        statement.bind_int32(13, new_file.gid as i32);
+        statement.bind_int32(14, new_file.rdev as i32);
+        statement.bind_int32(15, new_file.flags as i32);
         
         assert!(self.session.execute(&mut statement).is_ok());
 

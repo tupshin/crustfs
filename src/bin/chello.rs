@@ -31,6 +31,7 @@ fn main () {
     insert_inode: "INSERT INTO crustfs.inode(part_id, inode, parent_inode, size, blocks,
       atime, mtime, ctime, crtime, kind, perm, nlink, uid, gid, rdev, flags)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)".to_string(),
+      select_max_inode: "SELECT inode FROM crustfs.inode where part_id = ? order by inode desc limit 1".to_string(),
 
   };
 
