@@ -90,6 +90,11 @@ pub struct CrustFS {
 static INODE_PARTITIONS:u64=5;
 
 impl CrustFS {
+  /*This function chooses a random inode partition,
+    generates the next valid inode for that partition
+    and inserts a stub (just the partition_id and inode)
+    reserving the inode for the calling function
+  */
   fn allocate_inode(&mut self) -> (u64,u64) {
     //choose a random partition
     let partition:u64 = task_rng().gen_range(0u64,INODE_PARTITIONS);
