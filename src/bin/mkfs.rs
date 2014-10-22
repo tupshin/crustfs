@@ -6,27 +6,10 @@ extern crate crustfs;
 
 use cassandra::Cluster;
 use cassandra::Statement;
+use crustfs::CrustFS;
 
 fn main () {
-
-  struct Commands {
-    create_ks:String,
-    create_inode_table:String,
-    create_fs_metadata_table:String,
-} 
-
-let cmds = Commands{
-  //FIXME The keyspace create command should be able to take topology parameters
-    create_ks: "CREATE KEYSPACE IF NOT EXISTS crustfs
-      WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1' };".to_string(),
-   create_inode_table: "CREATE TABLE IF NOT EXISTS crustfs.inode
-      (part_id bigint, inode bigint, parent_inode bigint, size bigint, blocks bigint, atime bigint, mtime bigint,
-      ctime bigint, crtime bigint, kind text, perm int, nlink int, uid int, gid int,
-      rdev int, flags int, PRIMARY KEY (part_id,inode)) WITH CLUSTERING ORDER BY (inode DESC);".to_string(),
-    create_fs_metadata_table: "CREATE TABLE IF NOT EXISTS crustfs.fs_metadata
-      (key text, value text, PRIMARY KEY (key))".to_string(),
-  };
-
+    
   //FIXME contact points should be configurable
   let contact_points = "127.0.0.1".to_string();
   let cluster = Cluster::create(contact_points);
@@ -34,10 +17,22 @@ let cmds = Commands{
    match cluster.connect() {
     Err(fail) => println!("fail: {}",fail),
     Ok(session) => {
+      let crustfs = CrustFS::build(session);
       println!("Session Established. Making fs.");
-      assert!(session.execute(&mut Statement::build_from_string(cmds.create_ks.clone(),0)).is_ok());
-      assert!(session.execute(&mut Statement::build_from_string(cmds.create_inode_table.clone(),0)).is_ok());
-      assert!(session.execute(&mut Statement::build_from_string(cmds.create_fs_metadata_table.clone(),0)).is_ok());
+      assert!(session.execute(&mut Statement::build_from_string(crustfs.cmds.create_ks.clone(),0)).is_ok());
+      assert!(session.execute(&mut Statement::build_from_string(crustfs.cmds.create_inode_table.clone(),0)).is_ok());
+      assert!(session.execute(&mut Statement::build_from_string(crustfs.cmds.create_fs_metadata_table.clone(),0)).is_ok());
+      assert!(session.execute(&mut Statement::build_from_string(crustfs.cmds.create_null_inode.clone(),0)).is_ok());
+ 
+      let insert_root_inode_statement = &mut Statement::build_from_string(crustfs.cmds.create_root_inode.clone(),4);
+
+      let seconds = time::get_time().sec as i64;
+      insert_root_inode_statement.bind_int64(0, seconds);
+      insert_root_inode_statement.bind_int64(1, seconds); 
+      insert_root_inode_statement.bind_int64(2, seconds); 
+      insert_root_inode_statement.bind_int64(3, seconds);
+      assert!(session.execute(insert_root_inode_statement).is_ok());
+       
     }
   }
 }

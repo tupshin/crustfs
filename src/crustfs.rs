@@ -76,11 +76,46 @@ pub struct Commands {
   pub create_inode:String,
   pub select_max_inode:String,
   pub insert_inode_placeholder:String,
+  pub add_inode_to_parent:String,
+  pub create_root_inode:String,
+  pub create_null_inode:String,
+  pub select_child_inodes:String,
 }
 
 pub struct CrustFS {
   pub session:Session,
   pub cmds:Commands,
+}
+
+impl CrustFS {
+  pub fn build(session:Session) -> CrustFS {
+      let cmds = Commands{
+    use_ks:"Use crustfs".to_string(),
+    create_ks: "CREATE KEYSPACE IF NOT EXISTS crustfs
+      WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1' };".to_string(),
+    create_inode_table: "CREATE TABLE IF NOT EXISTS crustfs.inode
+      (part_id bigint, inode bigint, parent_inode bigint, size bigint, blocks bigint, atime bigint, mtime bigint,
+      ctime bigint, crtime bigint, kind text, perm int, nlink int, uid int, gid int,
+      rdev int, flags int, dir_contents map<text,bigint>, PRIMARY KEY (part_id,inode)) WITH CLUSTERING ORDER BY (inode DESC);".to_string(),
+    create_fs_metadata_table: "CREATE TABLE IF NOT EXISTS crustfs.fs_metadata
+      (key text, value text, PRIMARY KEY (key))".to_string(),
+    select_inode: "SELECT part_id,inode,parent_inode,size,blocks,atime,mtime,ctime,crtime,kind,perm,nlink,uid,gid,rdev,flags FROM crustfs.inode
+      WHERE part_id=? and inode =?;".to_string(),
+    create_inode: "UPDATE crustfs.inode SET parent_inode=?, size=?, blocks=?,
+      atime=?, mtime=?, ctime=?, crtime=?, kind=?, perm=?, nlink=?, uid=?, gid=?, rdev=?, flags=?
+      where part_id = ? and inode = ? if parent_inode=NULL".to_string(),
+    add_inode_to_parent: "UPDATE crustfs.inode SET dir_contents[?] = ? WHERE part_id=? and inode=? IF kind='dir'".to_string(),
+    insert_inode_placeholder: "INSERT INTO crustfs.inode(part_id, inode)
+      VALUES(?,?) IF NOT EXISTS".to_string(),
+    select_max_inode: "SELECT inode FROM crustfs.inode where part_id = ? order by inode desc limit 1".to_string(),
+    create_root_inode: "INSERT INTO crustfs.inode (part_id, inode, size, blocks, atime,mtime,ctime,crtime,kind,perm,nlink,uid,gid,rdev,flags)
+      VALUES(1,1,4096,1,?,?,?,?,'dir',0,0,0,0,0,0)".to_string(),
+    create_null_inode: "INSERT INTO crustfs.inode (part_id, inode, size, blocks, atime,mtime,ctime,crtime,kind,perm,nlink,uid,gid,rdev,flags)
+      VALUES(0,0,0,0,0,0,0,0,'null',0,0,0,0,0,0)".to_string(),
+    select_child_inodes: "SELECT dir_contents FROM crustfs.inode where part_id=? and inode=?".to_string(),
+  };
+   CrustFS{session:session,cmds:cmds}  
+  }
 }
 
 //This is the number of partitions the inodes will be sharded into.
@@ -96,12 +131,13 @@ impl CrustFS {
     reserving the inode for the calling function
   */
   fn allocate_inode(&mut self) -> (u64,u64) {
+    debug!("allocate_inode");
     //choose a random partition
     let partition:u64 = task_rng().gen_range(0u64,INODE_PARTITIONS);
 
     //select the maximum inode value in that partition.
     let select_max_inode_statement = &mut Statement::build_from_string(self.cmds.select_max_inode.clone(),1);
-    println!("binding partition: {}",partition);
+    debug!("binding partition: {}",partition);
     select_max_inode_statement.bind_int64(0, partition as i64);
 
     //return the inode that is generated out of the 
@@ -144,19 +180,39 @@ impl CrustFS {
       },
     }
   }
-  
 }
 
 impl Filesystem for CrustFS {
   fn lookup (&mut self, _req: &Request, parent: u64, name: &PosixPath, reply: ReplyEntry) {
-    if parent == 1 && name.as_str() == Some("hello.txt") {
-      reply.entry(&TTL, &HELLO_TXT_ATTR, 0);
-    } else {
-      reply.error(ENOENT);
-    }
+    debug!("lookup");
+    let mut statement = Statement::build_from_string(self.cmds.select_child_inodes.clone(), 2);
+       statement.bind_int64(0, parent as i64);
+       statement.bind_int64(1, (parent % INODE_PARTITIONS) as i64);
+
+      match self.session.execute(&statement) {
+        Err(fail) => println!("fail: {}",fail),
+        Ok(result) => {
+          let mut row_iterator = result.iterator();
+          for row in row_iterator {
+            let value = row.get_column(0);
+            let mut items_iterator = value.get_collection_iterator();
+            for item in items_iterator {
+              let item_string = item.get_string();
+              println!("item: {}", item_string);
+            } 
+          }
+        }
+      }
+      assert!(self.session.execute(&mut statement).is_ok());
+      if parent == 1 && name.as_str() == Some("hello.txt") {
+        reply.entry(&TTL, &HELLO_TXT_ATTR, 0);
+      } else {
+        reply.error(ENOENT);
+      }
   }
 
   fn getattr (&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+    debug!("getattr");
     match ino {
       1 => reply.attr(&TTL, &HELLO_DIR_ATTR),
       2 => reply.attr(&TTL, &HELLO_TXT_ATTR),
@@ -172,6 +228,7 @@ impl Filesystem for CrustFS {
   /// operation. fh will contain the value set by the open method, or will be undefined
   /// if the open method didn't set any value.
   fn read (&mut self, _req: &Request, ino: u64, _fh: u64, offset: u64, _size: uint, reply: ReplyData) {unsafe{
+    debug!("read");
     let mut statement = Statement::build_from_string(self.cmds.select_inode.clone(), 1);
     
     let future=self.session.execute(&mut statement);
@@ -181,16 +238,13 @@ impl Filesystem for CrustFS {
         reply.error(ENOENT)
       },
       Ok(result) => {
-        let mut rows = result.iterator();
-        if rows.next() {
-          let row = rows.get_row();
-          match row.get_column(9).get_string() {
-            Err(err) => error!("{}--",err),
-            Ok(col) => {
-              let cstr = CString::new(col.cass_string.data,false);
-               debug!("{}--",cstr);
-              reply.data(cstr.as_bytes().slice_from(offset as uint));
-            }
+        let row = result.first_row();
+        match row.get_column(9).get_string() {
+          Err(err) => error!("{}--",err),
+          Ok(col) => {
+            let cstr = CString::new(col.cass_string.data,false);
+             debug!("{}--",cstr);
+            reply.data(cstr.as_bytes().slice_from(offset as uint));
           }
         }
       }
@@ -213,6 +267,7 @@ impl Filesystem for CrustFS {
   /// value set by the opendir method, or will be undefined if the opendir method
   /// didn't set any value.
   fn readdir (&mut self, _req: &Request, ino: u64, _fh: u64, offset: u64, mut reply: ReplyDirectory) {
+    debug!("readdir");
     if ino == 1 {
       if offset == 0 {
                 reply.add(1, 0, TypeDirectory, &PosixPath::new("."));
@@ -226,12 +281,14 @@ impl Filesystem for CrustFS {
     }
 
   fn init (&mut self, _req: &Request) -> Result<(), c_int> {
+    debug!("init");
     Ok(())
   }
 
   /// Clean up filesystem
   /// Called on filesystem exit.
   fn destroy (&mut self, _req: &Request) {
+    debug!("destroy");
   }
 
   /// Forget about an inode
@@ -242,14 +299,15 @@ impl Filesystem for CrustFS {
   /// have a limited lifetime. On unmount it is not guaranteed, that all referenced
   /// inodes will receive a forget message.
   fn forget (&mut self, _req: &Request, _ino: u64, _nlookup: uint) {
-        fail!("forget not implemented");
+    fail!("forget not implemented");
   }
 
   /// Set file attributes
+  //FIXME provide proper setattr implementation
   fn setattr (&mut self, _req: &Request, _ino: u64, _mode: Option<u32>, _uid: Option<u32>, _gid: Option<u32>, _size: Option<u64>, _atime: Option<Timespec>, _mtime: Option<Timespec>, _fh: Option<u64>, _crtime: Option<Timespec>, _chgtime: Option<Timespec>, _bkuptime: Option<Timespec>, _flags: Option<u32>, reply: ReplyAttr) {
-    reply.error(ENOSYS);
-    fail!("setattr not implemented");
-    }
+    debug!("setattr");
+    reply.attr(&time::get_time(),&HELLO_TXT_ATTR);
+  }
 
   /// Read symbolic link
   fn readlink (&mut self, _req: &Request, _ino: u64, reply: ReplyData) {
@@ -272,7 +330,8 @@ impl Filesystem for CrustFS {
   /// Create a symbolic link
   fn symlink (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _link: &PosixPath, reply: ReplyEntry) {
     reply.error(ENOSYS);
-    fail!("symlink not implemented");
+    fail!("symlink not implemented: parent={}, name={}, link={}",_parent, _name.to_c_str(), _link.to_c_str());
+
   }
 
   /// Rename a file
@@ -284,7 +343,7 @@ impl Filesystem for CrustFS {
   /// Create a hard link
   fn link (&mut self, _req: &Request, _ino: u64, _newparent: u64, _newname: &PosixPath, reply: ReplyEntry) {
     reply.error(ENOSYS);
-    fail!("link not implemented");
+    fail!("link not implemented: ino={}, _newparent={}, _newname={}",_ino, _newparent, _newname.to_c_str());
   }
 
   /// Open a file
@@ -296,6 +355,7 @@ impl Filesystem for CrustFS {
   /// filesystem may set, to change the way the file is opened. See fuse_file_info
   /// structure in <fuse_common.h> for more details.
   fn open (&mut self, _req: &Request, _ino: u64, _flags: uint, reply: ReplyOpen) {
+    debug!("open");
     reply.opened(0, 0);
   }
 
@@ -321,6 +381,7 @@ impl Filesystem for CrustFS {
   /// filesystem wants to return write errors. If the filesystem supports file locking
   /// operations (setlk, getlk) it should remove all locks belonging to 'lock_owner'.
   fn flush (&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+    debug!("flush");
     reply.error(ENOSYS);
   }
 
@@ -333,6 +394,7 @@ impl Filesystem for CrustFS {
   /// if the open method didn't set any value. flags will contain the same flags as for
   /// open.
   fn release (&mut self, _req: &Request, _ino: u64, _fh: u64, _flags: uint, _lock_owner: u64, _flush: bool, reply: ReplyEmpty) {    
+    debug!("release");
     reply.ok();
   }
 
@@ -352,6 +414,7 @@ impl Filesystem for CrustFS {
   /// directory stream operations in case the contents of the directory can change
   /// between opendir and releasedir.
   fn opendir (&mut self, _req: &Request, _ino: u64, _flags: uint, reply: ReplyOpen) {
+    debug!("opendir");
     reply.opened(0, 0);
   }
 
@@ -360,6 +423,7 @@ impl Filesystem for CrustFS {
   /// contain the value set by the opendir method, or will be undefined if the
   /// opendir method didn't set any value.
   fn releasedir (&mut self, _req: &Request, _ino: u64, _fh: u64, _flags: uint, reply: ReplyEmpty) {
+    debug!("releasedir");
     reply.ok();
   }
 
@@ -374,6 +438,7 @@ impl Filesystem for CrustFS {
 
   /// Get file system statistics
   fn statfs (&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
+    debug!("statfs");
     reply.statfs(0, 0, 0, 0, 0, 512, 255, 0);
   }
 
@@ -401,8 +466,8 @@ impl Filesystem for CrustFS {
 
   /// Remove an extended attribute
   fn removexattr (&mut self, _req: &Request, _ino: u64, _name: &[u8], reply: ReplyEmpty) {
+    debug!("removexattr");
     reply.error(ENOSYS);
-    fail!("removexattr not implemented");
   }
 
   /// Check file access permissions
@@ -425,9 +490,10 @@ impl Filesystem for CrustFS {
   /// implemented or under Linux kernel versions earlier than 2.6.15, the mknod()
   /// and open() methods will be called instead.
   fn create (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _mode: u32, _flags: uint, reply: ReplyCreate) {
+    debug!("create");
     match _name.to_c_str().as_str() {
-      Some(p) => {
-        println!("Path: {}", p);
+      Some(path) => {
+        println!("Path: {}", path);
         println!("_mode: {}",_mode);
         println!("_flags: {}",_flags);
         println!("_name: {}",_name.is_file());
@@ -468,16 +534,26 @@ impl Filesystem for CrustFS {
         statement.bind_int64(15, new_file.ino as i64);
         
         assert!(self.session.execute(&mut statement).is_ok());
+  
+        let mut statement = Statement::build_from_string(self.cmds.add_inode_to_parent.clone(), 4);
+        println!("adding inode to parent:{}",new_file.ino);
+        let parent_partition = _parent % INODE_PARTITIONS;
+        statement.bind_string(0, path.to_string());
+        statement.bind_int64(1, inode as i64);
+        statement.bind_int64(2, _parent as i64);
+        statement.bind_int64(3, parent_partition as i64);
+        assert!(self.session.execute(&mut statement).is_ok());
 
-         reply.error(EIO);
-        },
+        //self, ttl: &Timespec, attr: &FileAttr, generation: u64, fh: u64, flags: u32
+
+        //FIXME set correct generation,fh,flags
+        reply.created(&now,&new_file,0,0,0);
+      },
       None    => {
         println!("No path specified!!");
         reply.error(EIO)
       }
     }
-
-   
   }
 
   /// Test for a POSIX file lock
