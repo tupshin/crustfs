@@ -12,8 +12,8 @@ name = "mkcrustfs" # the name of the executable to generate
 path = "src/bin/mkfs.rs"
 
 [[bin]]
-name = "chello" # the name of the executable to generate
-path = "src/bin/chello.rs"
+name = "mount-crustfs" # the name of the executable to generate
+path = "src/bin/mount-crustfs.rs"
 
 [dependencies.cassandra]
 git = "https://github.com/tupshin/rust-cassandra-wrapper"
