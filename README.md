@@ -1,6 +1,11 @@
-very rough prototype of getting data out of cassandra and into a fuse fs. all functions currently stubbed out. 
+very rough prototype of getting data out of cassandra and into a fuse fs. all functions currently stubbed out.
+Builds are done using Cargo
 
-compile
+Build using cargo:
+
+`cargo build`
+
+Create the keyspace and tables:
 
 `target/mkcrustfs` will create proper tables in Cassandra assuming it's running without authentication. 
 
