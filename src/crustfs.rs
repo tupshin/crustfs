@@ -8,9 +8,6 @@ extern crate time;
 extern crate fuse;
 extern crate cassandra;
 
-
-use std::c_str::CString;
-
 use std::rand::{task_rng, Rng};
 
 use std::io::{FilePermission,TypeFile, TypeDirectory, USER_FILE, USER_DIR};
@@ -138,7 +135,7 @@ impl CrustFS {
 
     //select the maximum inode value in that partition.
     let select_max_inode_statement = &mut Statement::build_from_string(self.cmds.select_max_inode.clone(),1);
-    debug!("binding partition: {}",partition);
+    debug!("allocate_inode: binding partition: {}",partition);
     select_max_inode_statement.bind_int64(0, partition as i64);
 
     //return the inode that is generated out of the 
@@ -147,7 +144,7 @@ impl CrustFS {
         //generate  a new inode by taking max found in #2 + INODE_PARTITIONS which is our offset for inodes within each partition.      
 
         let next_inode = if select_result.row_count() == 0u64 {
-            debug!("zero rows found in partition. adding first one");
+            debug!("allocate_inode: zero rows found in partition. adding first one");
             partition
           } //if this will be the first inode in the partition, then the new inode will be the same as the partition id.
           else {
@@ -156,7 +153,7 @@ impl CrustFS {
               Some(first_row) => {
                 match first_row.get_column(0).get_int64() {
                   Ok(res) => {
-                    debug!("got row {} in partition {}. adding new row {}",res,partition,res as u64+INODE_PARTITIONS);
+                    debug!("allocate_inode: got row {} in partition {}. adding new row {}",res,partition,res as u64+INODE_PARTITIONS);
                     res as u64 + INODE_PARTITIONS
                     },
                   Err(e) => {fail!("corrupt fs: {}",e)}
@@ -178,7 +175,7 @@ impl CrustFS {
             (partition,next_inode) //the insert succeeded, so we can consider the generated inode to be valid
           }
           Err(e) => {
-            debug!("insert race condition encountered: {}",e);
+            debug!("allocate_inode: insert race condition encountered: {}",e);
             self.allocate_inode() //can retry on failed inode allocation be tail recursive?
           }
         }
@@ -189,35 +186,49 @@ impl CrustFS {
     }
   }
 }
+struct Inode {
+  inode:u64
+}
+
+
+
+
+impl Inode {
+  fn to_u64(&self) -> u64 {self.inode}
+  fn to_i64(&self) -> i64 {self.inode as i64}
+  fn get_partition(&self) -> u64 {self.inode % INODE_PARTITIONS}
+}
+
 
 impl Filesystem for CrustFS {
   fn lookup (&mut self, _req: &Request, parent: u64, name: &PosixPath, reply: ReplyEntry) {
-    println!("lookup--parent: {}, name: {}", parent, name.filename_display());
+    let parent = Inode{inode:parent};
+    debug!("lookup: parent: {}, name: {}", parent.inode, name.filename_display());
     let mut statement = Statement::build_from_string(self.cmds.select_inode.clone(), 2);
-    statement.bind_int64(0, parent as i64);
-    statement.bind_int64(1, (parent % INODE_PARTITIONS) as i64);
-    let EMPTY_STRING = "".to_string();
+    statement.bind_int64(0, parent.to_i64());
+    statement.bind_int64(1,  parent.get_partition() as i64);
 
     match self.session.execute(&statement) {
-      Err(fail) => println!("fail: {}",fail),
+      Err(fail) => debug!("lookup: fail: {}",fail),
       Ok(result) => {
-        match result.first_row() {
+        let inode_exists = match result.first_row() {
           None=> {fail!{"no first row"}},
           Some(row) => {
-            println!("got row");
+            debug!("lookup: got row");
             let mut file_iterator = row.get_column(2).get_collection_iterator();
             let mut file_exists=false;
               for value in file_iterator {
                 if value.get_string().to_string() == name.filename_display().to_string() {file_exists = true;}
-                println!("file: {}",value.get_string());
+                debug!("lookup: file: {}",value.get_string());
               }
-              match file_exists {
-                //FIXME build a proper ATTR struct here
-                true => reply.entry(&TTL, &HELLO_TXT_ATTR, 0),
-                false => reply.error(ENOENT)
-              }
+              file_exists
           }
-        }        
+        };
+        match inode_exists {
+          //FIXME build a proper ATTR struct here
+          true => reply.entry(&TTL, &HELLO_TXT_ATTR, 0),
+          false => reply.error(ENOENT)
+        }
       }
     }
   }
@@ -278,36 +289,20 @@ impl Filesystem for CrustFS {
   /// value set by the opendir method, or will be undefined if the opendir method
   /// didn't set any value.
   fn readdir (&mut self, _req: &Request, ino: u64, _fh: u64, offset: u64, mut reply: ReplyDirectory) {
-    debug!("readdir ino:{} offset:{}",ino,offset);
-    let mut offset = offset;
-     if offset == 0 {
-        offset += 1;
-        reply.add(1, offset, TypeDirectory, &PosixPath::new("."));
-      }
-      if offset == 1 {
-        offset += 1;
-        reply.add(1, offset, TypeDirectory, &PosixPath::new(".."));
-      }
 
     match offset {
-    2 => {
-      let mut statement = Statement::build_from_string(self.cmds.select_child_inodes.clone(), 2);
-      statement.bind_int64(0, ino as i64);
-      statement.bind_int64(1, (ino % INODE_PARTITIONS) as i64);
-      let mut offset=offset;
-      if offset == 0 {
-        offset += 1;
-        reply.add(1, offset, TypeDirectory, &PosixPath::new("."));
-      }
-      if offset == 1 {
-        offset += 1;
-        reply.add(1, offset, TypeDirectory, &PosixPath::new(".."));
-      }
+    0 => {
+    debug!("readdir ino:{} offset:{}",ino,offset);
+    let inode:Inode=Inode{inode:ino};
+    reply.add(ino, 1, TypeDirectory, &PosixPath::new("."));
+    reply.add(ino, 1, TypeDirectory, &PosixPath::new(".."));
 
-
-      println!("ino: {}, offset: {}", ino, offset);
+    let mut statement = Statement::build_from_string(self.cmds.select_child_inodes.clone(), 2);
+      statement.bind_int64(0, inode.to_i64());
+      statement.bind_int64(1, (inode.get_partition()) as i64);
+      debug!("ino: {}, offset: {}", ino, offset);
       match self.session.execute(&statement) {
-        Err(fail) => println!("fail: {}",fail),
+        Err(fail) => fail!("fail: {}",fail),
         Ok(result) => {
           let mut row_iterator = result.iterator();
           for row in row_iterator {
@@ -317,20 +312,23 @@ impl Filesystem for CrustFS {
                 match item.get_string() {
                   Err(fail) => fail!("getting an item from a collection should never fail: {}", fail),
                   Ok(result) => {
-                    offset += 1;
-                    reply.add(3, offset, TypeFile, &PosixPath::new(result.to_string()));
-                    println!("item2: {}", result)
+                    reply.add(ino, 1, TypeFile, &PosixPath::new(result.to_string()));
+                    debug!("readdir: item2: {}", result)
                   }
                 }
-                offset += 1;
               }
-            //}
           }
+          debug!("readdir: ok reply");
           reply.ok();
         }
       }
-    },
-    _ => reply.error(ENOENT)
+      },
+      _ => {
+        reply.error(ENOENT);
+        debug!("readdir: enonent reply");
+      }
+
+  
   }
 }
 
