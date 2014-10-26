@@ -207,30 +207,22 @@ impl Filesystem for CrustFS {
             println!("got row");
             match row.get_column(0).get_string() {
               //None => fail!("couldn't get column 0"),
-                  Err(e) => {fail!(e);},
-                  Ok(str) => {
-                    if str.to_string().len() == 0 {
-                      //FIXME this should be selectively returning an entry if there's a real entry there, and a noent if it does not
-                      debug!("returning nonent for parent: {} name:{}",parent,name.filename_display())
-                      reply.error(ENOENT)
-                    } else {
-                        println!("value: {}", str);
-                        reply.entry(&TTL, &HELLO_TXT_ATTR, 0);
-                    }
-                  }
+              Err(e) => {fail!(e);},
+              Ok(str) => {
+                if str.to_string().len() == 0 {
+                  //FIXME this should be selectively returning an entry if there's a real entry there, and a noent if it does not
+                  debug!("returning nonent for parent: {} name:{}",parent,name.filename_display())
+                  reply.error(ENOENT)
+                } else {
+                    println!("value: {}", str);
+                    reply.entry(&TTL, &HELLO_TXT_ATTR, 0);
+                }
+              }
             }
-            //fail!("failing");
           }
-        }
-        
-        }
-        //~ assert!(self.session.execute(&mut statement).is_ok());
-        //~ if parent == 1 && name.as_str() == Some("hello.txt") {
-        
-      //~ } else {
-        //reply.error(ENOENT);
-    //  }
+        }        
       }
+    }
   }
 
   fn getattr (&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
