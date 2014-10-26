@@ -205,21 +205,19 @@ impl Filesystem for CrustFS {
           None=> {fail!{"no first row"}},
           Some(row) => {
             println!("got row");
-            match row.get_column(0) {
+            match row.get_column(0).get_string() {
               //None => fail!("couldn't get column 0"),
-              res => {
-                match res.get_string() {
                   Err(e) => {fail!(e);},
                   Ok(str) => {
                     if str.to_string().len() == 0 {
+                      //FIXME this should be selectively returning an entry if there's a real entry there, and a noent if it does not
+                      debug!("returning nonent for parent: {} name:{}",parent,name.filename_display())
                       reply.error(ENOENT)
                     } else {
                         println!("value: {}", str);
                         reply.entry(&TTL, &HELLO_TXT_ATTR, 0);
                     }
                   }
-                }
-              }
             }
             //fail!("failing");
           }
