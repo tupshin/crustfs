@@ -218,9 +218,12 @@ impl Filesystem for CrustFS {
             let mut file_iterator = row.get_column(2).get_collection_iterator();
             let mut file_exists=false;
               for value in file_iterator {
-                if value.get_string().to_string() == name.filename_display().to_string() {file_exists = true;}
-                debug!("lookup: file: {}",value.get_string());
+                match value.get_string() {
+                  Ok(value) =>  if value.to_string() == name.filename_display().to_string() {file_exists = true;},
+                  Err(_) => {}
+                }
               }
+              debug!("file_exists: {}",file_exists);
               file_exists
           }
         };
