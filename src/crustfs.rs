@@ -100,7 +100,7 @@ impl CrustFS {
       rdev int, flags int, dir_contents map<text,bigint>, PRIMARY KEY (part_id,inode)) WITH CLUSTERING ORDER BY (inode DESC);".to_string(),
     create_fs_metadata_table: "CREATE TABLE IF NOT EXISTS crustfs.fs_metadata
       (key text, value text, PRIMARY KEY (key))".to_string(),
-    select_inode: "SELECT part_id,inode,parent_inode,size,blocks,atime,mtime,ctime,crtime,kind,perm,nlink,uid,gid,rdev,flags FROM crustfs.inode
+    select_inode: "SELECT part_id,inode,dir_contents,parent_inode,size,blocks,atime,mtime,ctime,crtime,kind,perm,nlink,uid,gid,rdev,flags FROM crustfs.inode
       WHERE part_id=? and inode =?;".to_string(),
     create_inode: "UPDATE crustfs.inode SET parent_inode=?, size=?, blocks=?,
       atime=?, mtime=?, ctime=?, crtime=?, kind=?, perm=?, nlink=?, uid=?, gid=?, rdev=?, flags=?
@@ -205,20 +205,17 @@ impl Filesystem for CrustFS {
           None=> {fail!{"no first row"}},
           Some(row) => {
             println!("got row");
-            match row.get_column(0).get_string() {
-              //None => fail!("couldn't get column 0"),
-              Err(e) => {fail!(e);},
-              Ok(str) => {
-                if str.to_string().len() == 0 {
-                  //FIXME this should be selectively returning an entry if there's a real entry there, and a noent if it does not
-                  debug!("returning nonent for parent: {} name:{}",parent,name.filename_display())
-                  reply.error(ENOENT)
-                } else {
-                    println!("value: {}", str);
-                    reply.entry(&TTL, &HELLO_TXT_ATTR, 0);
-                }
+            let mut file_iterator = row.get_column(2).get_collection_iterator();
+            let mut file_exists=false;
+              for value in file_iterator {
+                if value.get_string().to_string() == name.filename_display().to_string() {file_exists = true;}
+                println!("file: {}",value.get_string());
               }
-            }
+              match file_exists {
+                //FIXME build a proper ATTR struct here
+                true => reply.entry(&TTL, &HELLO_TXT_ATTR, 0),
+                false => reply.error(ENOENT)
+              }
           }
         }        
       }
@@ -510,7 +507,7 @@ impl Filesystem for CrustFS {
   // FIXME: If arg.size is zero, the size of the value should be sent with fuse_getxattr_out
   // FIXME: If arg.size is non-zero, send the value if it fits, or ERANGE otherwise
     reply.error(ENOSYS);
-    fail!("getxattr not implemented");
+ //   fail!("getxattr not implemented");
   }
 
   /// List extended attribute names
