@@ -527,8 +527,8 @@ impl Filesystem for CrustFS {
   /// mount option is given, this method is not called. This method is not called
   /// under Linux kernel versions 2.4.x
   fn access (&mut self, _req: &Request, _ino: u64, _mask: uint, reply: ReplyEmpty) {
-    reply.error(ENOSYS);
-    fail!("access not implemented");
+    //FIXME implement proper access controls
+    reply.ok();
   }
 
   /// Create and open a file
