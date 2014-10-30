@@ -199,7 +199,6 @@ impl Inode {
   fn get_partition(&self) -> u64 {self.inode % INODE_PARTITIONS}
 }
 
-
 impl Filesystem for CrustFS {
   fn lookup (&mut self, _req: &Request, parent: u64, name: &PosixPath, reply: ReplyEntry) {
     let parent = Inode{inode:parent};
@@ -218,6 +217,7 @@ impl Filesystem for CrustFS {
             let mut file_iterator = row.get_column(2).get_collection_iterator();
             let mut file_exists=false;
               for value in file_iterator {
+                if (value.is_null()) {debug!("NULL");}
                 match value.get_string() {
                   Ok(value) =>  if value.to_string() == name.filename_display().to_string() {file_exists = true;},
                   Err(_) => {}
