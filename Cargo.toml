@@ -19,4 +19,4 @@ path = "src/bin/mount-crustfs.rs"
 git = "https://github.com/tupshin/rust-cassandra-wrapper"
 
 [dependencies.fuse]
-git = "https://github.com/tupshin/rust-fuse"
+git = "https://github.com/suhr/rust-fuse"

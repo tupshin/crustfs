@@ -19,13 +19,12 @@ fn main () {
     Ok(session) => {
       let crustfs = CrustFS::build(session);
       println!("Session Established. Making fs.");
-      assert!(session.execute(&mut Statement::build_from_string(crustfs.cmds.create_ks.clone(),0)).is_ok());
-      assert!(session.execute(&mut Statement::build_from_string(crustfs.cmds.create_inode_table.clone(),0)).is_ok());
-      assert!(session.execute(&mut Statement::build_from_string(crustfs.cmds.create_fs_metadata_table.clone(),0)).is_ok());
-      assert!(session.execute(&mut Statement::build_from_string(crustfs.cmds.create_null_inode.clone(),0)).is_ok());
- 
-      let insert_root_inode_statement = &mut Statement::build_from_string(crustfs.cmds.create_root_inode.clone(),4);
+      assert!(session.execute(&mut Statement::build_from_string(&crustfs.cmds.create_ks,0)).is_ok());
+      assert!(session.execute(&mut Statement::build_from_string(&crustfs.cmds.create_inode_table,0)).is_ok());
+      assert!(session.execute(&mut Statement::build_from_string(&crustfs.cmds.create_fs_metadata_table,0)).is_ok());
+      assert!(session.execute(&mut Statement::build_from_string(&crustfs.cmds.create_null_inode,0)).is_ok());
 
+      let insert_root_inode_statement = &mut Statement::build_from_string(&crustfs.cmds.create_root_inode,4);
       let seconds = time::get_time().sec as i64;
       insert_root_inode_statement.bind_int64(0, seconds);
       insert_root_inode_statement.bind_int64(1, seconds); 

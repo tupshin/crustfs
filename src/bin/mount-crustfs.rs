@@ -19,9 +19,9 @@ fn main () {
     Err(fail) => println!("fail: {}",fail),
     Ok(session) => {
       let crustfs = CrustFS::build(session);
-      assert!(session.execute(&mut Statement::build_from_string(crustfs.cmds.create_ks.clone(),0)).is_ok());
-      assert!(session.execute(&mut Statement::build_from_string(crustfs.cmds.create_inode_table.clone(),0)).is_ok());
-      assert!(session.execute(&mut Statement::build_from_string(crustfs.cmds.create_fs_metadata_table.clone(),0)).is_ok());
+      assert!(session.execute(&mut Statement::build_from_string(&crustfs.cmds.create_ks,0)).is_ok());
+      assert!(session.execute(&mut Statement::build_from_string(&crustfs.cmds.create_inode_table,0)).is_ok());
+      assert!(session.execute(&mut Statement::build_from_string(&crustfs.cmds.create_fs_metadata_table,0)).is_ok());
 
       println!("Session Established. Mounting fs.");
       fuse::mount(crustfs, &mountpoint, []);
