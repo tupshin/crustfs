@@ -20,3 +20,6 @@ git = "https://github.com/tupshin/rust-cassandra-wrapper"
 
 [dependencies.fuse]
 git = "https://github.com/suhr/rust-fuse"
+
+[dependencies.docopt_macros]
+git = "git://github.com/docopt/docopt.rs"
