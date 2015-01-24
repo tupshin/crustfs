@@ -1,16 +1,21 @@
 #![crate_name = "crustfs"]
+#![feature(plugin)]
 
-#![feature(phase)]
-#[phase(plugin, link)] extern crate log;
+
+#[macro_use] extern crate log;
 
 extern crate libc;
 extern crate time;
 extern crate fuse;
-extern crate cassandra;
+extern crate cql_ffi_safe;
 
-use std::rand::{task_rng, Rng};
+use std::string::ToString;
 
-use std::io::{FilePermission,TypeFile, TypeDirectory, USER_FILE, USER_DIR};
+use std::rand::{thread_rng, Rng};
+
+use std::io::FileType;
+
+use std::io::{FilePermission, USER_FILE, USER_DIR};
 use std::io::fs::PathExtensions;
 
 use fuse::{FileAttr, Filesystem, Request, ReplyData, ReplyEntry, ReplyAttr, ReplyDirectory};
@@ -23,8 +28,16 @@ use libc::ENOSYS;
 
 use time::Timespec;
 
-use cassandra::Statement;
-use cassandra::Session;
+use std::ffi::CString;
+
+use cql_ffi_safe::CassStatement;
+use cql_ffi_safe::CassSession;
+use cql_ffi_safe::CassCollection;
+use cql_ffi_safe::CassString;
+use cql_ffi_safe::CassValueType;
+
+static INODE_PARTITIONS:u64=5;
+
 
 static HELLO_DIR_ATTR: FileAttr = FileAttr {
     ino: 1,
@@ -34,7 +47,7 @@ static HELLO_DIR_ATTR: FileAttr = FileAttr {
     mtime: Timespec { sec: 1381237736, nsec: 0 },
     ctime: Timespec { sec: 1381237736, nsec: 0 },
     crtime: Timespec { sec: 1381237736, nsec: 0 },
-    kind: TypeDirectory,
+    kind: FileType::Directory,
     perm: USER_DIR,
     nlink: 2,
     uid: 501,
@@ -51,7 +64,7 @@ static HELLO_TXT_ATTR: FileAttr = FileAttr {
     mtime: Timespec { sec: 1381237736, nsec: 0 },
     ctime: Timespec { sec: 1381237736, nsec: 0 },
     crtime: Timespec { sec: 1381237736, nsec: 0 },
-    kind: TypeFile,
+    kind: FileType::RegularFile,
     perm: USER_FILE,
     nlink: 1,
     uid: 501,
@@ -63,126 +76,129 @@ static HELLO_TXT_ATTR: FileAttr = FileAttr {
 
 static TTL: Timespec = Timespec { sec: 1, nsec: 0 };    // 1 second
 
-static CREATE_TIME: Timespec = Timespec { sec: 1381237736, nsec: 0 };   // 2013-10-08 08:56
-
 pub struct Commands {
-  pub use_ks:String,
-  pub select_inode:String,
-  pub create_ks:String,
-  pub create_inode_table:String,
-  pub create_fs_metadata_table:String,
-  pub create_inode:String,
-  pub select_max_inode:String,
-  pub insert_inode_placeholder:String,
-  pub add_inode_to_parent:String,
-  pub create_root_inode:String,
-  pub create_null_inode:String,
-  pub select_child_inodes:String,
+  pub use_ks:&'static str,
+  pub select_inode:&'static str,
+  pub create_ks:&'static str,
+  pub drop_inode_table:&'static str,
+  pub drop_fs_metadata_table:&'static str,
+  pub create_inode_table:&'static str,
+  pub create_fs_metadata_table:&'static str,
+  pub create_inode:&'static str,
+  pub select_max_inode:&'static str,
+  pub insert_inode_placeholder:&'static str,
+  pub add_inode_to_parent:&'static str,
+  pub create_root_inode:&'static str,
+  pub create_null_inode:&'static str,
+  pub select_child_inodes:&'static str,
 }
 
-pub struct CrustFS {
-  pub session:Session,
+pub struct CrustFS<'a> {
+  pub session:CassSession<'a>,
   pub cmds:Commands,
 }
 
-impl CrustFS {
-  pub fn build(session:Session) -> CrustFS {
+impl<'a> CrustFS<'a> {
+  pub fn build(session:CassSession) -> CrustFS {
       let cmds = Commands{
-    use_ks:"Use crustfs".to_string(),
+    use_ks:"Use crustfs",
     create_ks: "CREATE KEYSPACE IF NOT EXISTS crustfs
-      WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1' };".to_string(),
+      WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1' };",
+    drop_inode_table: "DROP TABLE IF EXISTS crustfs.inode",
+    drop_fs_metadata_table: "DROP TABLE IF EXISTS crustfs.fs_metadata",
     create_inode_table: "CREATE TABLE IF NOT EXISTS crustfs.inode
       (part_id bigint, inode bigint, parent_inode bigint, size bigint, blocks bigint, atime bigint, mtime bigint,
       ctime bigint, crtime bigint, kind text, perm int, nlink int, uid int, gid int,
-      rdev int, flags int, dir_contents map<text,bigint>, PRIMARY KEY (part_id,inode)) WITH CLUSTERING ORDER BY (inode DESC);".to_string(),
+      rdev int, flags int, dir_contents map<text,bigint>, PRIMARY KEY (part_id,inode)) WITH CLUSTERING ORDER BY (inode DESC);",
     create_fs_metadata_table: "CREATE TABLE IF NOT EXISTS crustfs.fs_metadata
-      (key text, value text, PRIMARY KEY (key))".to_string(),
+      (key text, value text, PRIMARY KEY (key))",
     select_inode: "SELECT part_id,inode,dir_contents,parent_inode,size,blocks,atime,mtime,ctime,crtime,kind,perm,nlink,uid,gid,rdev,flags FROM crustfs.inode
-      WHERE part_id=? and inode =?;".to_string(),
+      WHERE part_id=? and inode =?;",
     create_inode: "UPDATE crustfs.inode SET parent_inode=?, size=?, blocks=?,
       atime=?, mtime=?, ctime=?, crtime=?, kind=?, perm=?, nlink=?, uid=?, gid=?, rdev=?, flags=?
-      where part_id = ? and inode = ? if parent_inode=NULL".to_string(),
-    add_inode_to_parent: "UPDATE crustfs.inode SET dir_contents[?] = ? WHERE part_id=? and inode=? IF kind='dir'".to_string(),
+      where part_id = ? and inode = ? if parent_inode=NULL",
+    add_inode_to_parent: "UPDATE crustfs.inode SET dir_contents[?] = ? WHERE part_id=? and inode=? IF kind='dir'",
     insert_inode_placeholder: "INSERT INTO crustfs.inode(part_id, inode, dir_contents)
-      VALUES(?,?,{}) IF NOT EXISTS".to_string(),
-    select_max_inode: "SELECT inode FROM crustfs.inode where part_id = ? order by inode desc limit 1".to_string(),
+      VALUES(?,?,{}) IF NOT EXISTS",
+    select_max_inode: "SELECT inode FROM crustfs.inode where part_id = ? order by inode desc limit 1",
     create_root_inode: "INSERT INTO crustfs.inode (part_id, inode, size, blocks, atime,mtime,ctime,crtime,kind,perm,nlink,uid,gid,rdev,flags)
-      VALUES(1,1,4096,1,?,?,?,?,'dir',0,0,0,0,0,0)".to_string(),
+      VALUES(1,1,4096,1,?,?,?,?,'dir',0,0,0,0,0,0)",
     create_null_inode: "INSERT INTO crustfs.inode (part_id, inode, size, blocks, atime,mtime,ctime,crtime,kind,perm,nlink,uid,gid,rdev,flags)
-      VALUES(0,0,0,0,0,0,0,0,'null',0,0,0,0,0,0)".to_string(),
-    select_child_inodes: "SELECT dir_contents FROM crustfs.inode where part_id=? and inode=?".to_string(),
+      VALUES(0,0,0,0,0,0,0,0,'null',0,0,0,0,0,0)",
+    select_child_inodes: "SELECT dir_contents FROM crustfs.inode where part_id=? and inode=?",
   };
    CrustFS{session:session,cmds:cmds}  
   }
-}
+
 
 //This is the number of partitions the inodes will be sharded into.
 //In production, this should be quite high. If you want strictly linear
 //growth in inode generation for testing, set it to 1, but that will
 //cause a hot spot in the cluster.
-static INODE_PARTITIONS:u64=5;
 
-impl CrustFS {
+
   /*This function chooses a random inode partition,
     generates the next valid inode for that partition
     and inserts a stub (just the partition_id and inode)
     reserving the inode for the calling function
   */
-  fn allocate_inode(&mut self) -> (u64,u64) {
+  fn allocate_inode(&self) -> (u64,u64) {
     debug!("allocate_inode");
     //choose a random partition
-    let partition:u64 = task_rng().gen_range(0u64,INODE_PARTITIONS);
+    let partition:u64 = thread_rng().gen_range(0u64,INODE_PARTITIONS);
 
     //select the maximum inode value in that partition.
-    let select_max_inode_statement = &mut Statement::build_from_string(&self.cmds.select_max_inode,1);
+    let select_max_inode_statement = CassStatement::new(self.cmds.select_max_inode,1);
     debug!("allocate_inode: binding partition: {}",partition);
-    select_max_inode_statement.bind_int64(0, partition as i64);
+    select_max_inode_statement.bind_i64(0, partition as i64);
 
-    //return the inode that is generated out of the 
-    match self.session.execute(select_max_inode_statement) {
-      Ok(select_result) => {
-        //generate  a new inode by taking max found in #2 + INODE_PARTITIONS which is our offset for inodes within each partition.      
-
-        let next_inode = if select_result.row_count() == 0u64 {
+    //return the inode that is generated out of the
+    let future = self.session.execute(select_max_inode_statement);
+    future.wait();
+    //FIXME match not needed or safe api should change. choose.
+    match future.get_result() {
+      select_result => {
+        //generate  a new inode by taking max found in #2 + INODE_PARTITIONS which is our offset for inodes within each partition.
+        let next_inode = if select_result.unwrap().row_count() == 0u64 {
             debug!("allocate_inode: zero rows found in partition. adding first one");
             partition
           } //if this will be the first inode in the partition, then the new inode will be the same as the partition id.
           else {
-            match select_result.first_row() {
-              None=>{panic!("no first row")},
-              Some(first_row) => {
+            match select_result.unwrap().first_row() {
+              Err(err)=>{panic!("no first row: {:?}",err)},
+              Ok(first_row) => {
                 match first_row.get_column(0).get_int64() {
                   Ok(res) => {
                     debug!("allocate_inode: got row {} in partition {}. adding new row {}",res,partition,res as u64+INODE_PARTITIONS);
                     res as u64 + INODE_PARTITIONS
                     },
-                  Err(e) => {panic!("corrupt fs: {}",e)}
+                  Err(e) => {panic!("corrupt fs: {:?}",e)}
                 }
               }
             }
           };
-
-        
         //insert into inode if not exists on the new inode.
-        let insert_inode_placeholder_statement = &mut Statement::build_from_string(&self.cmds.insert_inode_placeholder,2);
+        let insert_inode_placeholder_statement = CassStatement::new(self.cmds.insert_inode_placeholder,2);
 
         //FIXME make these chainable
-        insert_inode_placeholder_statement.bind_int64(0, partition as i64);
-        insert_inode_placeholder_statement.bind_int64(1, next_inode as i64); 
-        match self.session.execute(insert_inode_placeholder_statement) {
-          Ok(_) => {
+        insert_inode_placeholder_statement.bind_i64(0, partition as i64);
+        insert_inode_placeholder_statement.bind_i64(1, next_inode as i64);
+        let future = self.session.execute(insert_inode_placeholder_statement);
+        future.wait();
+        match future.get_result() {
+          Some(_) => {
             //FIXME. make sure I don't need to pay more attention to a succsesful result
             (partition,next_inode) //the insert succeeded, so we can consider the generated inode to be valid
           }
-          Err(e) => {
-            debug!("allocate_inode: insert race condition encountered: {}",e);
+          None => {
+            debug!("allocate_inode: insert race condition encountered");
             self.allocate_inode() //can retry on failed inode allocation be tail recursive?
           }
         }
       },
-      Err(e) => {
-        panic!("server errror: {}", e);
-      },
+      //~ Err(e) => {
+        //~ panic!("server errror: {}", e);
+      //~ },
     }
   }
 }
@@ -192,32 +208,34 @@ struct Inode {
 
 
 
-
+#[allow(dead_code)]
 impl Inode {
   fn to_u64(&self) -> u64 {self.inode}
   fn to_i64(&self) -> i64 {self.inode as i64}
   fn get_partition(&self) -> u64 {self.inode % INODE_PARTITIONS}
 }
 
-impl Filesystem for CrustFS {
-  fn lookup (&mut self, _req: &Request, parent: u64, name: &PosixPath, reply: ReplyEntry) {
+impl<'a> Filesystem for CrustFS<'a> {
+  fn lookup (&mut self, _req: &Request, parent: u64, name: &Path, reply: ReplyEntry) {
     let parent = Inode{inode:parent};
     debug!("lookup: parent: {}, name: {}", parent.inode, name.filename_display());
-    let mut statement = Statement::build_from_string(&self.cmds.select_inode, 2);
-    statement.bind_int64(0, parent.to_i64());
-    statement.bind_int64(1,  parent.get_partition() as i64);
-
-    match self.session.execute(&statement) {
-      Err(fail) => debug!("lookup: fail: {}",fail),
-      Ok(result) => {
+    let mut statement = CassStatement:: new(self.cmds.select_inode, 2);
+    statement.bind_i64(0, parent.to_i64());
+    statement.bind_i64(1,  parent.get_partition() as i64);
+    let future = self.session.execute(statement);
+    future.wait();
+    match future.get_result() {
+      None => debug!("lookup: fail"),
+      Some(result) => {
         let inode_exists = match result.first_row() {
-          None=> {panic!{"no first row"}},
-          Some(row) => {
+          Err(_)=> {panic!{"no first row"}},
+          Ok(row) => {
             debug!("lookup: got row");
-            let mut file_iterator = row.get_column(2).get_collection_iterator();
+            let mut file_iterator = row.get_column(2).collection_iter();
             let mut file_exists=false;
-              for value in file_iterator {
-                if (value.is_null()) {debug!("NULL");}
+              while file_iterator.has_next() {
+                let value = file_iterator.get_column();
+                //if value.is_null() {debug!("NULL");}
                 match value.get_string() {
                   Ok(value) =>  if value.to_string() == name.filename_display().to_string() {file_exists = true;},
                   Err(_) => {}
@@ -252,36 +270,42 @@ impl Filesystem for CrustFS {
   /// return value of the read system call will reflect the return value of this
   /// operation. fh will contain the value set by the open method, or will be undefined
   /// if the open method didn't set any value.
-  fn read (&mut self, _req: &Request, ino: u64, _fh: u64, offset: u64, _size: uint, reply: ReplyData) {unsafe{
-    panic!("read");
-    //~ let mut statement = Statement::build_from_string(self.cmds.select_inode.clone(), 1);
+  #[allow(unused_variables)]
+  fn read (&mut self, _req: &Request, ino: u64, _fh: u64, offset: u64, u32: u32, reply: ReplyData) {/*unsafe*/{
+    //panic!("read");
+    let mut statement = CassStatement::new(self.cmds.select_inode.clone(), 1);
     
-    //~ let future=self.session.execute(&mut statement);
-    //~ statement.bind_string(0, ino.to_string());
-    //~ match future {
-      //~ Err(_) => {
-        //~ reply.error(ENOENT)
-      //~ },
-      //~ Ok(result) => {
-        //~ let row = result.first_row();
-        //~ match row.get_column(9).get_string() {
-          //~ Err(err) => error!("{}--",err),
-          //~ Ok(col) => {
-            //~ let cstr = CString::new(col.cass_string.data,false);
-             //~ println!("cstr: {}",cstr);
-            //~ reply.data(cstr.as_bytes().slice_from(offset as uint));
-          //~ }
-        //~ }
-      //~ }
-    //~ }
+    let future=self.session.execute(statement);
+    future.wait();
+    statement.bind_i64(0, ino as i64);
+    match future.get_result() {
+      None => {
+        reply.error(ENOENT)
+      },
+      Some(result) => {
+        match result.first_row() {
+            Err(err) => error!("{:?}--",err),
+            Ok(row) => {
+                match row.get_column(9).get_string() {
+                    Err(err) => error!("{:?}--",err),
+                    Ok(col) => {
+                        //let cstr = CString::new(col.cass_string.data,false);
+                        println!("str: {:?}",col);
+                        reply.data(col.to_string().slice_from(offset as usize).as_bytes());
+                    }
+            }
+          }
+        }
+      }
+    }
   }}
 
-  fn mknod (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _mode: u32, _rdev: u32, reply: ReplyEntry) {
+  fn mknod (&mut self, _req: &Request, _parent: u64, _name: &Path, _mode: u32, _rdev: u32, reply: ReplyEntry) {
     reply.error(ENOENT);
     panic!("mknod not implemented");
   }
 
-  fn mkdir (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _mode: u32, reply: ReplyEntry) {
+  fn mkdir (&mut self, _req: &Request, _parent: u64, _name: &Path, _mode: u32, reply: ReplyEntry) {
     reply.error(ENOENT);
     panic!("mkdir not implemented");
   }
@@ -292,32 +316,41 @@ impl Filesystem for CrustFS {
   /// value set by the opendir method, or will be undefined if the opendir method
   /// didn't set any value.
   fn readdir (&mut self, _req: &Request, ino: u64, _fh: u64, offset: u64, mut reply: ReplyDirectory) {
-
     match offset {
     0 => {
-    debug!("readdir ino:{} offset:{}",ino,offset);
-    let inode:Inode=Inode{inode:ino};
-    reply.add(ino, 1, TypeDirectory, &PosixPath::new("."));
-    reply.add(ino, 1, TypeDirectory, &PosixPath::new(".."));
+      debug!("readdir ino:{} offset:{}",ino,offset);
+      let inode:Inode=Inode{inode:ino};
+      reply.add(ino, 1, FileType::Directory, &Path::new("."));
+      reply.add(ino, 1, FileType::Directory, &Path::new(".."));
 
-    let mut statement = Statement::build_from_string(&self.cmds.select_child_inodes, 2);
-      statement.bind_int64(0, inode.to_i64());
-      statement.bind_int64(1, (inode.get_partition()) as i64);
+      let mut statement = CassStatement::new(self.cmds.select_child_inodes, 2);
+      statement.bind_i64(0, inode.to_i64());
+      statement.bind_i64(1, (inode.get_partition()) as i64);
       debug!("ino: {}, offset: {}", ino, offset);
-      match self.session.execute(&statement) {
-        Err(fail) => panic!("fail: {}",fail),
-        Ok(result) => {
-          let mut row_iterator = result.iterator();
-          for row in row_iterator {
+      let future = self.session.execute(statement);
+      future.wait();
+      match future.get_result() {
+        None => panic!("fail"),
+        Some(result) => {
+          let mut row_iterator = result.iter();
+          while row_iterator.has_next() {
+              let row = row_iterator.get_row();
             //if row.length() > 0 {
-              let value = row.get_column(0);
-              for item in value.get_collection_iterator() {
-                match item.get_string() {
-                  Err(fail) => panic!("getting an item from a collection should never fail: {}", fail),
-                  Ok(result) => {
-                    reply.add(ino, 1, TypeFile, &PosixPath::new(result.to_string()));
-                    debug!("readdir: item2: {}", result)
-                  }
+              let column = row.get_column(0);
+              let mut collection_items = column.collection_iter();
+              while collection_items.has_next() {
+                let item = collection_items.get_column();
+                match item.get_type() {
+                    CassValueType::TEXT => {
+                        let result = item.get_string();
+                           panic!("result");
+                            reply.add(ino, 1, FileType::RegularFile, &Path::new(result));
+                            debug!("readdir: item2: {:?}", result)
+                    }
+                    _ => panic!("getting an item from a collection should never fail")
+                 
+                  
+              
                 }
               }
           }
@@ -325,15 +358,13 @@ impl Filesystem for CrustFS {
           reply.ok();
         }
       }
-      },
-      _ => {
+    },
+    _ => {
         reply.error(ENOENT);
         debug!("readdir: enonent reply");
       }
-
-  
+    }
   }
-}
 
   fn init (&mut self, _req: &Request) -> Result<(), c_int> {
     debug!("init");
@@ -353,7 +384,7 @@ impl Filesystem for CrustFS {
   /// each forget. The filesystem may ignore forget calls, if the inodes don't need to
   /// have a limited lifetime. On unmount it is not guaranteed, that all referenced
   /// inodes will receive a forget message.
-  fn forget (&mut self, _req: &Request, _ino: u64, _nlookup: uint) {
+  fn forget (&mut self, _req: &Request, _ino: u64, _nlookup: u64) {
     panic!("forget not implemented");
   }
 
@@ -371,34 +402,34 @@ impl Filesystem for CrustFS {
   }
 
   /// Remove a file
-  fn unlink (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, reply: ReplyEmpty) {
+  fn unlink (&mut self, _req: &Request, _parent: u64, _name: &Path, reply: ReplyEmpty) {
     reply.error(ENOSYS);
     panic!("unlink not implemented");
   }
 
   /// Remove a directory
-  fn rmdir (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, reply: ReplyEmpty) {
+  fn rmdir (&mut self, _req: &Request, _parent: u64, _name: &Path, reply: ReplyEmpty) {
     reply.error(ENOSYS);
     panic!("rmdir not implemented");    
   }
 
   /// Create a symbolic link
-  fn symlink (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _link: &PosixPath, reply: ReplyEntry) {
+  fn symlink (&mut self, _req: &Request, _parent: u64, _name: &Path, _link: &Path, reply: ReplyEntry) {
     reply.error(ENOSYS);
-    panic!("symlink not implemented: parent={}, name={}, link={}",_parent, _name.to_c_str(), _link.to_c_str());
+    panic!("symlink not implemented: parent={}, name={}, link={}",_parent, _name.as_str(), _link.as_str());
 
   }
 
   /// Rename a file
-  fn rename (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _newparent: u64, _newname: &PosixPath, reply: ReplyEmpty) {
+  fn rename (&mut self, _req: &Request, _parent: u64, _name: &Path, _newparent: u64, _newname: &Path, reply: ReplyEmpty) {
     reply.error(ENOSYS);
     panic!("rename not implemented");
   }
 
   /// Create a hard link
-  fn link (&mut self, _req: &Request, _ino: u64, _newparent: u64, _newname: &PosixPath, reply: ReplyEntry) {
+  fn link (&mut self, _req: &Request, _ino: u64, _newparent: u64, _newname: &Path, reply: ReplyEntry) {
     reply.error(ENOSYS);
-    panic!("link not implemented: ino={}, _newparent={}, _newname={}",_ino, _newparent, _newname.to_c_str());
+    panic!("link not implemented: ino={:?}, _newparent={:?}, _newname={:?}",_ino, _newparent, _newname.as_str());
   }
 
   /// Open a file
@@ -409,7 +440,7 @@ impl Filesystem for CrustFS {
   /// anything in fh. There are also some flags (direct_io, keep_cache) which the
   /// filesystem may set, to change the way the file is opened. See fuse_file_info
   /// structure in <fuse_common.h> for more details.
-  fn open (&mut self, _req: &Request, _ino: u64, _flags: uint, reply: ReplyOpen) {
+  fn open (&mut self, _req: &Request, _ino: u64, _flags: u32, reply: ReplyOpen) {
     debug!("open");
     reply.opened(0, 0);
   }
@@ -420,7 +451,7 @@ impl Filesystem for CrustFS {
   /// which case the return value of the write system call will reflect the return
   /// value of this operation. fh will contain the value set by the open method, or
   /// will be undefined if the open method didn't set any value.
-  fn write (&mut self, _req: &Request, _ino: u64, _fh: u64, _offset: u64, _data: &[u8], _flags: uint, reply: ReplyWrite) {
+  fn write (&mut self, _req: &Request, _ino: u64, _fh: u64, _offset: u64, _data: &[u8], _flags: u32, reply: ReplyWrite) {
     reply.error(ENOSYS);
     panic!("write not implemented");    
   }
@@ -448,7 +479,7 @@ impl Filesystem for CrustFS {
   /// the release. fh will contain the value set by the open method, or will be undefined
   /// if the open method didn't set any value. flags will contain the same flags as for
   /// open.
-  fn release (&mut self, _req: &Request, _ino: u64, _fh: u64, _flags: uint, _lock_owner: u64, _flush: bool, reply: ReplyEmpty) {    
+  fn release (&mut self, _req: &Request, _ino: u64, _fh: u64, _flags: u32, _lock_owner: u64, _flush: bool, reply: ReplyEmpty) {    
     debug!("release");
     reply.ok();
   }
@@ -468,7 +499,7 @@ impl Filesystem for CrustFS {
   /// anything in fh, though that makes it impossible to implement standard conforming
   /// directory stream operations in case the contents of the directory can change
   /// between opendir and releasedir.
-  fn opendir (&mut self, _req: &Request, _ino: u64, _flags: uint, reply: ReplyOpen) {
+  fn opendir (&mut self, _req: &Request, _ino: u64, _flags: u32, reply: ReplyOpen) {
     debug!("opendir");
     reply.opened(0, 0);
   }
@@ -477,7 +508,7 @@ impl Filesystem for CrustFS {
   /// For every opendir call there will be exactly one releasedir call. fh will
   /// contain the value set by the opendir method, or will be undefined if the
   /// opendir method didn't set any value.
-  fn releasedir (&mut self, _req: &Request, _ino: u64, _fh: u64, _flags: uint, reply: ReplyEmpty) {
+  fn releasedir (&mut self, _req: &Request, _ino: u64, _fh: u64, _flags: u32, reply: ReplyEmpty) {
     debug!("releasedir");
     reply.ok();
   }
@@ -498,7 +529,7 @@ impl Filesystem for CrustFS {
   }
 
   /// Set an extended attribute
-  fn setxattr (&mut self, _req: &Request, _ino: u64, _name: &[u8], _value: &[u8], _flags: uint, _position: u32, reply: ReplyEmpty) {
+  fn setxattr (&mut self, _req: &Request, _ino: u64, _name: &[u8], _value: &[u8], _flags: u32, _position: u32, reply: ReplyEmpty) {
     reply.error(ENOSYS);
     panic!("setxattr not implemented");
   }
@@ -529,7 +560,7 @@ impl Filesystem for CrustFS {
   /// This will be called for the access() system call. If the 'default_permissions'
   /// mount option is given, this method is not called. This method is not called
   /// under Linux kernel versions 2.4.x
-  fn access (&mut self, _req: &Request, _ino: u64, _mask: uint, reply: ReplyEmpty) {
+  fn access (&mut self, _req: &Request, _ino: u64, _mask: u32, reply: ReplyEmpty) {
     //FIXME implement proper access controls
     reply.ok();
   }
@@ -544,9 +575,9 @@ impl Filesystem for CrustFS {
   /// structure in <fuse_common.h> for more details. If this method is not
   /// implemented or under Linux kernel versions earlier than 2.6.15, the mknod()
   /// and open() methods will be called instead.
-  fn create (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _mode: u32, _flags: uint, reply: ReplyCreate) {
+  fn create (&mut self, _req: &Request, _parent: u64, _name: &Path, _mode: u32, _flags: u32, reply: ReplyCreate) {
     println!("create");
-    match _name.to_c_str().as_str() {
+    match _name.as_str() {
       Some(path) => {
         println!("Path: {}", path);
         println!("_mode: {}",_mode);
@@ -561,7 +592,7 @@ impl Filesystem for CrustFS {
           ino:inode,
           size:0,blocks:0,
           atime:now,mtime:now,ctime:now,crtime:now,
-          kind:TypeFile,
+          kind:FileType::RegularFile,
           perm:FilePermission::empty(),
           nlink:0,
           uid:0,gid:0,
@@ -569,34 +600,34 @@ impl Filesystem for CrustFS {
           flags:0,
         };
 
-        let mut statement = Statement::build_from_string(&self.cmds.create_inode, 16);
+        let mut statement = CassStatement::new(self.cmds.create_inode, 16);
         println!("inserting inode:{}",new_file.ino);
-        statement.bind_int64(0, _parent as i64);
-        statement.bind_int64(1, new_file.size as i64);
-        statement.bind_int64(2, new_file.blocks as i64);
-        statement.bind_int64(3, new_file.atime.sec as i64);
-        statement.bind_int64(4, new_file.mtime.sec as i64);
-        statement.bind_int64(5, new_file.ctime.sec as i64);
-        statement.bind_int64(6, new_file.crtime.sec as i64);
-        statement.bind_string(7, /* FIXME new_file.kind */ &"file".to_string());
-        statement.bind_int32(8, new_file.perm.bits() as i32);
-        statement.bind_int32(9, new_file.nlink as i32);
-        statement.bind_int32(10, new_file.uid as i32);
-        statement.bind_int32(11, new_file.gid as i32);
-        statement.bind_int32(12, new_file.rdev as i32);
-        statement.bind_int32(13, new_file.flags as i32);
-        statement.bind_int64(14, partition as i64);
-        statement.bind_int64(15, new_file.ino as i64);
+        statement.bind_i64(0, _parent as i64);
+        statement.bind_i64(1, new_file.size as i64);
+        statement.bind_i64(2, new_file.blocks as i64);
+        statement.bind_i64(3, new_file.atime.sec as i64);
+        statement.bind_i64(4, new_file.mtime.sec as i64);
+        statement.bind_i64(5, new_file.ctime.sec as i64);
+        statement.bind_i64(6, new_file.crtime.sec as i64);
+        statement.bind_string(7, /* FIXME new_file.kind */ "file");
+        statement.bind_i32(8, new_file.perm.bits() as i32);
+        statement.bind_i32(9, new_file.nlink as i32);
+        statement.bind_i32(10, new_file.uid as i32);
+        statement.bind_i32(11, new_file.gid as i32);
+        statement.bind_i32(12, new_file.rdev as i32);
+        statement.bind_i32(13, new_file.flags as i32);
+        statement.bind_i64(14, partition as i64);
+        statement.bind_i64(15, new_file.ino as i64);
         
-        assert!(self.session.execute(&mut statement).is_ok());
+        assert!(!self.session.execute(statement).is_error());
   
-        let mut statement = Statement::build_from_string(&self.cmds.add_inode_to_parent, 4);
+        let mut statement = CassStatement::new(self.cmds.add_inode_to_parent, 4);
         println!("adding inode to parent:{}",new_file.ino);
         let parent_partition = _parent % INODE_PARTITIONS;
-        statement.bind_string(0, &path.to_string());
-        statement.bind_int64(1, inode as i64);
-        statement.bind_int64(2, _parent as i64);
-        statement.bind_int64(3, parent_partition as i64);
+        statement.bind_string(0, path);
+        statement.bind_i64(1, inode as i64);
+        statement.bind_i64(2, _parent as i64);
+        statement.bind_i64(3, parent_partition as i64);
         assert!(self.session.execute(&mut statement).is_ok());
 
         //self, ttl: &Timespec, attr: &FileAttr, generation: u64, fh: u64, flags: u32
@@ -632,8 +663,30 @@ impl Filesystem for CrustFS {
   /// Map block index within file to block index within device
   /// Note: This makes sense only for block device backed filesystems mounted
   /// with the 'blkdev' option
-  fn bmap (&mut self, _req: &Request, _ino: u64, _blocksize: uint, _idx: u64, reply: ReplyBmap) {
+  fn bmap (&mut self, _req: &Request, _ino: u64, _blocksize: u32, _idx: u64, reply: ReplyBmap) {
     reply.error(ENOSYS);
     panic!("getxattr not implemented");
   }
+}
+
+#[cfg(test)]
+mod tests {
+  extern crate cassandra;
+  use cassandra::Cluster;
+  use super::CrustFS;
+  use fuse::Filesystem;
+  
+    #[test]
+    /// create a test file inode as a child of the root inode
+    fn create_inode() {
+      let cluster = Cluster::create("127.0.0.1".to_string());
+      match cluster.connect() {
+        Err(fail) => println!("fail: {}",fail),
+        Ok(session) => {
+          let crustfs = CrustFS::build(session);
+           //fn create (&mut self, _req: &Request, _parent: u64, _name: &PosixPath, _mode: u32, _flags: uint, reply: ReplyCreate)
+          crustfs.create(Request::new());
+        }
+      }
+    }
 }

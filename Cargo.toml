@@ -15,11 +15,15 @@ path = "src/bin/mkfs.rs"
 name = "mount-crustfs" # the name of the executable to generate
 path = "src/bin/mount-crustfs.rs"
 
-[dependencies.cassandra]
-git = "https://github.com/tupshin/rust-cassandra-wrapper"
+[dependencies]
+# cql-ffi-safe = "*"
+docopt_macros = "*"
+log = "0.1.10"
+time = "0.1.14"
+# fuse = "0.2.2"
 
 [dependencies.fuse]
-git = "https://github.com/suhr/rust-fuse"
+git = "https://github.com/tupshin/rust-fuse"
 
-[dependencies.docopt_macros]
-git = "git://github.com/docopt/docopt.rs"
+[dependencies.cql-ffi-safe]
+git = "https://github.com/tupshin/cql-ffi-safe"
