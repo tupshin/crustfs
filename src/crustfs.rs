@@ -142,29 +142,30 @@ impl<'a> CrustFS<'a> {
     and inserts a stub (just the partition_id and inode)
     reserving the inode for the calling function
   */
-  fn allocate_inode(&self) -> (u64,u64) {
+  fn allocate_inode(&mut self) -> (u64,u64) {
     debug!("allocate_inode");
     //choose a random partition
     let partition:u64 = thread_rng().gen_range(0u64,INODE_PARTITIONS);
 
     //select the maximum inode value in that partition.
-    let select_max_inode_statement = CassStatement::new(self.cmds.select_max_inode,1);
+    let mut select_max_inode_statement = CassStatement::new(self.cmds.select_max_inode,1);
     debug!("allocate_inode: binding partition: {}",partition);
     select_max_inode_statement.bind_i64(0, partition as i64);
 
     //return the inode that is generated out of the
-    let future = self.session.execute(select_max_inode_statement);
+    let mut future = self.session.execute(select_max_inode_statement);
     future.wait();
     //FIXME match not needed or safe api should change. choose.
     match future.get_result() {
-      select_result => {
+      mut select_result => {
         //generate  a new inode by taking max found in #2 + INODE_PARTITIONS which is our offset for inodes within each partition.
         let next_inode = if select_result.unwrap().row_count() == 0u64 {
             debug!("allocate_inode: zero rows found in partition. adding first one");
             partition
           } //if this will be the first inode in the partition, then the new inode will be the same as the partition id.
           else {
-            match select_result.unwrap().first_row() {
+              let result = select_result.unwrap();
+            match result.first_row() {
               Err(err)=>{panic!("no first row: {:?}",err)},
               Ok(first_row) => {
                 match first_row.get_column(0).get_int64() {
@@ -178,12 +179,12 @@ impl<'a> CrustFS<'a> {
             }
           };
         //insert into inode if not exists on the new inode.
-        let insert_inode_placeholder_statement = CassStatement::new(self.cmds.insert_inode_placeholder,2);
+        let mut insert_inode_placeholder_statement = CassStatement::new(self.cmds.insert_inode_placeholder,2);
 
         //FIXME make these chainable
         insert_inode_placeholder_statement.bind_i64(0, partition as i64);
         insert_inode_placeholder_statement.bind_i64(1, next_inode as i64);
-        let future = self.session.execute(insert_inode_placeholder_statement);
+        let mut future = self.session.execute(insert_inode_placeholder_statement);
         future.wait();
         match future.get_result() {
           Some(_) => {
@@ -344,7 +345,8 @@ impl<'a> Filesystem for CrustFS<'a> {
                     CassValueType::TEXT => {
                         let result = item.get_string();
                            panic!("result");
-                            reply.add(ino, 1, FileType::RegularFile, &Path::new(result));
+                           //FIXME have to reply
+                            //reply.add(ino, 1, FileType::RegularFile, &Path::new(result));
                             debug!("readdir: item2: {:?}", result)
                     }
                     _ => panic!("getting an item from a collection should never fail")
@@ -416,7 +418,7 @@ impl<'a> Filesystem for CrustFS<'a> {
   /// Create a symbolic link
   fn symlink (&mut self, _req: &Request, _parent: u64, _name: &Path, _link: &Path, reply: ReplyEntry) {
     reply.error(ENOSYS);
-    panic!("symlink not implemented: parent={}, name={}, link={}",_parent, _name.as_str(), _link.as_str());
+    panic!("symlink not implemented: parent={:?}, name={:?}, link={:?}",_parent, _name.as_str(), _link.as_str());
 
   }
 
@@ -628,7 +630,7 @@ impl<'a> Filesystem for CrustFS<'a> {
         statement.bind_i64(1, inode as i64);
         statement.bind_i64(2, _parent as i64);
         statement.bind_i64(3, parent_partition as i64);
-        assert!(self.session.execute(&mut statement).is_ok());
+        assert!(!self.session.execute(statement).is_error());
 
         //self, ttl: &Timespec, attr: &FileAttr, generation: u64, fh: u64, flags: u32
 
