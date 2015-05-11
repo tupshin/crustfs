@@ -16,14 +16,14 @@ name = "mount-crustfs" # the name of the executable to generate
 path = "src/bin/mount-crustfs.rs"
 
 [dependencies]
-# cql-ffi-safe = "*"
-docopt_macros = "*"
-log = "0.1.10"
-time = "0.1.14"
-# fuse = "0.2.2"
+cql_ffi = "*"
+# docopt_macros = "*"
+log = "*"
+time = "*"
+rand = "*"
 
 [dependencies.fuse]
-git = "https://github.com/tupshin/rust-fuse"
+git = "https://github.com/zargony/rust-fuse.git"
 
-[dependencies.cql-ffi-safe]
-git = "https://github.com/tupshin/cql-ffi-safe"
+# [dependencies.cql_ffi]
+# git = "file:///home/tupshin/workspaces/rust/cql-ffi"
